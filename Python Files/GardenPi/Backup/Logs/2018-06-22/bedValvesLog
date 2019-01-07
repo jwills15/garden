@@ -1,0 +1,41 @@
+Gravel Bed Log File for 2018-06-22
+---------------------------------------
+10:47:33: The Pi is ready for the day.
+
+10:49:42: Turning on valve 1.
+10:50:42: Turning off valve 1.
+10:50:55: The Pi is ready for the day.
+
+11:27:18: Turning on valve 2.
+
+11:27:18: An error occured on valve 2.
+name 'f' is not defined
+
+11:28:24: Turning on valve 3.
+11:29:24: Turning off valve 3.
+11:29:57: The Pi is ready for the day.
+
+11:55:37: Turning on valve 4.
+11:56:37: Turning off valve 4.
+11:58:56: Turning on valve 1.
+11:59:56: Turning off valve 1.
+13:07:00: The Pi is ready for the day.
+
+13:38:04: Turning on valve 2.
+13:39:04: Turning off valve 2.
+13:41:23: Turning on valve 3.
+13:42:24: Turning off valve 3.
+
+13:42:41: The Pi restarted.
+
+13:44:50: Turning on valve 4.
+13:45:50: Turning off valve 4.
+13:45:56: Turning on valve 1.
+13:46:56: Turning off valve 1.
+13:49:14: The Pi is ready for the day.
+
+16:32:35: Turning on valve 2.
+16:33:35: Turning off valve 2.
+
+16:34:01: The Pi is done for the day.
+

@@ -1,0 +1,6 @@
+# minute   hour    day of month   month    weekday      Command    
+# (0-59)  (0-23)    (1-31)       (1-12)     (0-6)                
+0,15,30,45	7-18	*           *         *        env DISPLAY=:0 python3 /home/pi/GardenPi/main.py 
+   55	    6		*	    *	      *	       env DISPLAY=:0 python3 /home/pi/GardenPi/main.py startup
+   5	    19		*	    *	      *	       env DISPLAY=:0 python3 /home/pi/GardenPi/main.py shutdown
+@reboot                                                env DISPLAY=:0 python3 /home/pi/GardenPi/main.py init
