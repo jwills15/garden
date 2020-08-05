@@ -8,6 +8,7 @@ import time
 import RPi.GPIO as GPIO
 import configparser #module for the config file
 import i2cPy3 #module that interfaces between i2c and DO sensor
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTShadowClient # alexa 
 from twython import Twython
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BOARD)
@@ -60,8 +61,79 @@ def tweet(message):
         myTweet = Twython(C_key, C_secret, A_token, A_secret)
         myTweet.update_status(status=message)
     except:
-        # could not tweet due to error
-        print('Could not tweet.')
+        # could not tweet due to error, logs error in bed valves log
+        filePath = (os.path.abspath(os.path.dirname(__file__)) + '/Logs/' + date())
+        if not os.path.exists(filePath):
+            createLogs(filePath)
+        with open(filePath + '/bedValvesLog', 'a') as log_file:
+            log_file.write('\n{}: No internet connection. Could not tweet.\n\n'.format(currentTime()))
+
+
+def alexa(config, doLevel, wlDistance, temp):
+    try:
+        # configure the values to be passed
+        pinBed1 = int(config['gpio_bed1'])
+        pinBed2 = int(config['gpio_bed2'])
+        pinBed3 = int(config['gpio_bed3'])
+        pinBed4 = int(config['gpio_bed4'])
+        pinDO = int(config['gpio_do_sprinkler'])
+        pinFill = int(config['gpio_fill'])
+        GPIO.setup((pinBed1, pinBed2, pinBed3, pinBed4, pinDO, pinFill), GPIO.OUT)
+        
+        # gravel beds section
+        bed = 1;
+        if not GPIO.input(pinBed2):
+            bed = 2
+        elif not GPIO.input(pinBed3):
+            bed = 3
+        elif not GPIO.input(pinBed4):
+            bed = 4
+
+        # sprinklers section
+        sprinklers = "off"
+        if not GPIO.input(pinDO):
+            sprinklers = "on"
+
+        # water fill section
+        fill = "off"
+        if not GPIO.input(pinFill):
+            fill = "on"
+
+        # time updated
+        updated = time.strftime("%A, %b %d %Y at %I:%M %p", time.localtime())
+
+        # connects to alexa
+        # Edit this to be the awshost you got from `aws iot describe-endpoint`
+        awshost = "a3dgne3tku6c5g.iot.us-west-2.amazonaws.com"
+
+        # Edit this to be your device name in the AWS IoT console
+        thing = "gardenpi"
+
+        awsport = 8883
+        caPath = "aws-iot-rootCA.crt"
+        certPath = "cert.pem"
+        keyPath = "privKey.pem"
+        # For certificate based connection
+        myShadowClient = AWSIoTMQTTShadowClient(thing)
+        myShadowClient.configureEndpoint(awshost, awsport)
+        myShadowClient.configureCredentials(caPath, keyPath, certPath)
+        myShadowClient.configureConnectDisconnectTimeout(60) 
+        myShadowClient.configureMQTTOperationTimeout(10)  
+        myShadowClient.connect()
+        myDeviceShadow = myShadowClient.createShadowHandlerWithName("gardenpi", True)
+
+        # sends to alexa
+        tempreading = "{ \"state\" : { \"reported\": { \"updated\": \"%s\", \"bed\": \"%s\", \"temp\": \"%s\", \"oxygen\": \"%s\", \"sprinklers\": \"%s\", \"wlevel\": \"%s\", \"fill\": \"%s\" } } }" % (updated, str(bed), str('%.1f'%(temp)), str(doLevel), sprinklers, str('%.1f'%(wlDistance)), fill)
+        myDeviceShadow.shadowUpdate(tempreading, None, 5)
+
+    except:
+        # could not talk to alexa due to error, logs error in bed valves log
+        filePath = (os.path.abspath(os.path.dirname(__file__)) + '/Logs/' + date())
+        if not os.path.exists(filePath):
+            createLogs(filePath)
+        with open(filePath + '/bedValvesLog', 'a') as log_file:
+            log_file.write('\n{}: No internet connection. Could not update Alexa.\n\n'.format(currentTime()))
+    
     
 def nextValve(bedConfig, current):
     # defines the current valve and switches to the next sequential valve
@@ -84,7 +156,7 @@ def currentValve(bedConfig):
     return int(bedConfig['CurrentBed']['current_valve'])
 
 
-def runGravelBed(config, bedConfig, logFile, doLevel, temp):
+def runGravelBed(config, bedConfig, logFile, doLevel, wlDistance, temp):
     # sets the next valve and returns it
     current = nextValve(bedConfig, currentValve(bedConfig))
     pin = 0
@@ -112,8 +184,9 @@ def runGravelBed(config, bedConfig, logFile, doLevel, temp):
             log_file.write('{}: Turning on valve {}.\n'.format(currentTime(), current))
             GPIO.output(pin, GPIO.LOW)
             log_file.flush()
-            # runs GUI update before call to sleep for duration of runtime
-            UpdateGUI(config, doLevel, temp)
+            # runs alexa and GUI update before call to sleep for duration of runtime
+            alexa(config, doLevel, wlDistance, temp)
+            UpdateGUI(config, doLevel, wlDistance, temp)
             # lets the valve run for the specified amount of time
             time.sleep(runtime * 60) #converts value to minutes
             log_file.write('{}: Turning off valve {}.\n'.format(currentTime(), current))
@@ -164,60 +237,121 @@ def runDOsystem(config, logFile):
 
 def checkDO():
     # returns the value of the dissolved oxygen given by the sensor
-    level = i2cPy3.main()
-    return level
+    try:
+        level = i2cPy3.main()
+        return level
+    except:
+        logFile = (os.path.abspath(os.path.dirname(__file__)) + '/Logs/' + date() + '/DOsensorLog')
+        with open(logFile, 'a') as log_file:
+            log_file.write('{}: Dissolved oxygen sensor not found.\n'.format(currentTime()))
+        message = '{} {}: Dissolved oxygen sensor not found.'.format(date(), currentTime())
+        tweet(message)
+        return -1
 
 
 def runWaterLevel(config, logFile):
-    level = checkWL(config)
+    waterLevelDistance = checkWL(config)
     pin = int(config['gpio_fill'])
+    # TODO water level valve
+    # grabs the desired distance of water height (in cm)
+    waterLevelSetting = int(config['water_distance'])
     with open(logFile, 'a') as log_file:
         GPIO.setup(pin, GPIO.OUT)
         # turns on fill system if water level is too low
-        if not GPIO.input(pin) and not level:
+        if not GPIO.input(pin) and waterLevelDistance > waterLevelSetting:
             log_file.write('{}: Water level is too low. Fill is already on.\n'.format(currentTime()))
             GPIO.output(pin, GPIO.LOW)
 
-        elif not level:
+        elif waterLevelDistance > waterLevelSetting:
             log_file.write('\n{}: Water level is too low. Turning on fill.\n'.format(currentTime()))
             GPIO.output(pin, GPIO.LOW)
             message = '{} {}: Water level is too low. Turning on fill.'.format(date(), currentTime())
             tweet(message)
             
-        # checks to see if pin is already outputting high but is now good
+        # checks to see if pin is already outputting high but water level is now good
         elif not GPIO.input(pin):
             log_file.write('{}: Water level has returned to normal. Turning off fill.\n\n'.format(currentTime()))
             GPIO.output(pin, GPIO.HIGH)
             message = '{} {}: Water level has returned to normal. Turning off fill.'.format(date(), currentTime())
             tweet(message)
 
-        # do level is good and sprinklers are off
+        # water level is good and fill system is off
         else:
             GPIO.output(pin, GPIO.HIGH)
             log_file.write('{}: Water level is good.\n'.format(currentTime()))
 
+    return waterLevelDistance
+
 
 # checks the water level sensor
 def checkWL(config):
-    pin = int(config['gpio_water_sensor'])
-    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    # if there is no water, the pin will return a false
-    if not GPIO.input(pin):
-        return False
-    # if there is water, the pin will return a true
+    trig_pin = int(config['gpio_ultrasonic_trig'])
+    echo_pin = int(config['gpio_ultrasonic_echo'])
+    GPIO.setup(trig_pin, GPIO.OUT)
+    GPIO.setup(echo_pin, GPIO.IN)
+
+    # stores a timeout for if sensor is not found
+    timeout = time.time() + 10; # 10 seconds
+    sensorError = False;
+
+    # sends out the trigger pulse
+    GPIO.output(trig_pin, True)
+    time.sleep(0.00001)
+    GPIO.output(trig_pin, False)
+
+    # stores the times to calculate the distance
+    startTime = time.time();
+    stopTime = time.time();
+    # save the start time
+    while GPIO.input(echo_pin) == 0:
+        startTime = time.time()
+        if time.time() > timeout:
+            sensorError = True
+            break
+    # save time of arrival
+    while GPIO.input(echo_pin) == 1:
+        stopTime = time.time()
+        if time.time() > timeout:
+            sensorError = True
+            break
+
+    logFile = (os.path.abspath(os.path.dirname(__file__)) + '/Logs/' + date() + '/waterLevelLog')
+    # checks if there was an error with the sensor
+    if sensorError:
+        with open(logFile, 'a') as log_file:
+            log_file.write('{}: Ultrasonic sensor not found.\n'.format(currentTime()))
+        message = '{} {}: Ultrasonic sensor not found.'.format(date(), currentTime())
+        tweet(message)
+        return -1
+    # no problem with sensor, operate as normal
     else:
-        return True
+        # finds time difference
+        timeElapsed = stopTime - startTime
+        # find distance by multiplying with sonic speed 34300 cm/s (divide by 2 for there and back)
+        distance = (timeElapsed * 34300) / 2
+
+        with open(logFile, 'a') as log_file:
+            log_file.write('{}: Water Distance- {} cm.\n'.format(currentTime(), '%.1f'%(distance)))
+
+        return distance
+    # TODO ultrasonic sensor
 
 
 # checks the temperature of the water
 def checkTemp():
-    sensor = W1ThermSensor()
-    temperature_in_fahrenheit = sensor.get_temperature(W1ThermSensor.DEGREES_F)
-    temperature_in_fahrenheit = '%.1f'%(temperature_in_fahrenheit)
     logFile = (os.path.abspath(os.path.dirname(__file__)) + '/Logs/' + date() + '/temperatureLog')
-    with open(logFile, 'a') as log_file:
-        log_file.write('{}: Water Temperature- {} ºF.\n'.format(currentTime(), temperature_in_fahrenheit))
-    return temperature_in_fahrenheit
+    try:
+        sensor = W1ThermSensor()
+        temperature_in_fahrenheit = sensor.get_temperature(W1ThermSensor.DEGREES_F)
+        with open(logFile, 'a') as log_file:
+            log_file.write('{}: Water Temperature- {} ºF.\n'.format(currentTime(), '%.1f'%(temperature_in_fahrenheit)))
+        return temperature_in_fahrenheit
+    except:
+        with open(logFile, 'a') as log_file:
+            log_file.write('{}: Temperature sensor not found.\n'.format(currentTime()))
+        message = '{} {}: Temperature sensor not found.'.format(date(), currentTime())
+        tweet(message)
+        return -1
 
 
 # returns the date
@@ -250,7 +384,7 @@ def createLogs(filePath):
     
 
 # creates a GUI that shows the status of the valves and the values of the sensors
-def UpdateGUI(config, doLevel, temp):
+def UpdateGUI(config, doLevel, wlDistance, temp):
     pinBed1 = int(config['gpio_bed1'])
     pinBed2 = int(config['gpio_bed2'])
     pinBed3 = int(config['gpio_bed3'])
@@ -273,17 +407,17 @@ def UpdateGUI(config, doLevel, temp):
     if not GPIO.input(pinBed2):
         label_bed2_status = tk.Label(win, text='ON', relief = SUNKEN, width=15, bg='green', font = ('Helvetica', 20)).grid(row=2,column=1)
     else:
-        label_bed1_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=2,column=1)
+        label_bed2_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=2,column=1)
 
     if not GPIO.input(pinBed3):
         label_bed3_status = tk.Label(win, text='ON', relief = SUNKEN, width=15, bg='green', font = ('Helvetica', 20)).grid(row=3,column=1)
     else:
-        label_bed1_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=3,column=1)
+        label_bed3_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=3,column=1)
 
     if not GPIO.input(pinBed4):
         label_bed4_status = tk.Label(win, text='ON', relief = SUNKEN, width=15, bg='green', font = ('Helvetica', 20)).grid(row=4,column=1)
     else:
-        label_bed1_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=4,column=1)
+        label_bed4_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=4,column=1)
 
     # dissolved oxygen sensor section
     label_gravelBeds = tk.Label(win, text='Dissolved Oxygen', relief = RAISED, width=30, font = ('Helvetica', 24)).grid(row=5,column=0, columnspan=2)
@@ -297,18 +431,26 @@ def UpdateGUI(config, doLevel, temp):
 
     # water level section
     label_waterLevel = tk.Label(win, text='Water Level', relief = RAISED, width=30, font = ('Helvetica', 24)).grid(row=8,column=0, columnspan=2)
-    label_fillValve = tk.Label(win, text='Filling', relief = RIDGE, width=15, font = ('Helvetica', 20)).grid(row=9,column=0)
+    # TODO water level distance section
+    label_waterDistance = tk.Label(win, text='Distance', relief = RIDGE, width=15, font = ('Helvetica', 20)).grid(row=9,column=0)
+    label_waterDistance_status = tk.Label(win, text='{} cm'.format('%.1f'%(wlDistance)), relief = SUNKEN, bg='white', width=15, font = ('Helvetica', 20)).grid(row=9,column=1)
+    label_fillValve = tk.Label(win, text='Filling', relief = RIDGE, width=15, font = ('Helvetica', 20)).grid(row=10,column=0)
     if not GPIO.input(pinFill):
-        label_fillValve_status = tk.Label(win, text='ON', relief = SUNKEN, width=15, bg='green', font = ('Helvetica', 20)).grid(row=9,column=1)
+        label_fillValve_status = tk.Label(win, text='ON', relief = SUNKEN, width=15, bg='green', font = ('Helvetica', 20)).grid(row=10,column=1)
     else:
-        label_fillValve_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=9,column=1)
+        label_fillValve_status = tk.Label(win, text='OFF', relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=10,column=1)
 
     # temperature section
-    label_temperature = tk.Label(win, text='Water Temperature', relief = RAISED, width=30, font = ('Helvetica', 24)).grid(row=10,column=0, columnspan=2)
-    label_currentTemp = tk.Label(win, text='Current Temp', relief = RIDGE, width=15, font = ('Helvetica', 20)).grid(row=11,column=0)
-    label_currentTemp_status = tk.Label(win, text='{} ºF'.format(temp), relief = SUNKEN, width=15, bg='white', font = ('Helvetica', 20)).grid(row=11,column=1)
+    label_temperature = tk.Label(win, text='Water Temperature', relief = RAISED, width=30, font = ('Helvetica', 24)).grid(row=11,column=0, columnspan=2)
+    label_currentTemp = tk.Label(win, text='Current Temp', relief = RIDGE, width=15, font = ('Helvetica', 20)).grid(row=12,column=0)
+    # TODO change color depending on temp
+    if temp < int(config['temp_min']):
+        label_currentTemp_status = tk.Label(win, text='{} ºF'.format('%.1f'%(temp)), relief = SUNKEN, width=15, bg='red', font = ('Helvetica', 20)).grid(row=12,column=1)
+    else:
+        label_currentTemp_status = tk.Label(win, text='{} ºF'.format('%.1f'%(temp)), relief = SUNKEN, width=15, bg='green', font = ('Helvetica', 20)).grid(row=12,column=1)
 
-    label_buffer = tk.Label(win, text='Please do not close GUI', relief = RAISED, width=30, font = ('Helvetica', 24)).grid(row=12,column=0, columnspan=2)
+    label_buffer = tk.Label(win, text='DO NOT CLOSE GUI', relief = RAISED, width=30, bg='yellow', font = ('Helvetica', 24)).grid(row=13,column=0, columnspan=2)
+    label_updated = tk.Label(win, text='Last Updated: {}'.format(currentTime()), relief = RAISED, width=30, bg='yellow', font = ('Helvetica', 24)).grid(row=14,column=0, columnspan=2)
     # updates the GUI before the sleep call
     win.update()
     
@@ -369,16 +511,13 @@ def sensors():
     DOoutput = ('Dissolved Oxygen Level: {} mg/L.\n'.format(DOlevel))
 
     # returns the water temperature
-    tempString = 'Water Temperature: {} ºF.\n'.format(checkTemp())
+    tempString = 'Water Temperature: {} ºF.\n'.format('%.1f'%(checkTemp()))
     
     # returns the water level
     config = load_config()
-    waterLevel = checkWL(config)
-    wlString = ''
-    if waterLevel:
-        wlString = 'The water level is good.'
-    else:
-        wlString = 'The water level is too low.'
+    waterLevelDistance = checkWL(config)
+    wlString = 'Water Level Distance: {} cm.'.format('%.1f'%(waterLevelDistance))
+    # TODO change the water level to int
 
     # returns the combined string from sensors
     return (DOoutput + tempString + wlString)
@@ -401,14 +540,14 @@ def main():
     doLevel = runDOsystem(config, doLog)
     # takes measurement from water level and takes appropriate measures
     wlLog = (filePath + '/waterLevelLog')
-    runWaterLevel(config, wlLog)
+    wlDistance = runWaterLevel(config, wlLog)
     # takes the measurement from the water level
     tempLog = (filePath + '/temperatureLog')
     temp = checkTemp()
     
     # fills the gravel beds
     gravelLog = (filePath + '/bedValvesLog')
-    runGravelBed(config, bedConfig, gravelLog, doLevel,  temp)
+    runGravelBed(config, bedConfig, gravelLog, doLevel, wlDistance, temp)
     
 
 def init(start=False, end=False):
@@ -419,30 +558,31 @@ def init(start=False, end=False):
     pinBed3 = int(config['gpio_bed3'])
     pinBed4 = int(config['gpio_bed4'])
     pinDO = int(config['gpio_do_sprinkler'])
-    pinWLsensor = int(config['gpio_water_sensor'])
     pinFill = int(config['gpio_fill'])
     GPIO.setup((pinBed1, pinBed2, pinBed3, pinBed4, pinDO, pinFill), GPIO.OUT)
     GPIO.output((pinBed1, pinBed2, pinBed3, pinBed4, pinDO, pinFill), GPIO.HIGH)
-    GPIO.setup(pinWLsensor, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
     #check for log file for the day
     filePath = (os.path.abspath(os.path.dirname(__file__)) + '/Logs/' + date())
     if not os.path.exists(filePath):
         createLogs(filePath)
-            
-    # logs that the pi restarted
+     
+    # logs that the pi initiated
     if start:
         # logs that the pi got ready for the day
         with open(filePath + '/bedValvesLog', 'a') as log_file:
             log_file.write('{}: The Pi is ready for the day.\n\n'.format(currentTime()))
-        message = ('{} {}: The Pi is ready for the day.'.format(date(), currentTime()))
+        # TODO tweets the temp
+        message = ('{} {}: The Pi is ready for the day. Water Temperature: {} ºF.'.format(date(), currentTime(), '%.1f'%(checkTemp())))
         tweet(message)
     elif end:
         # logs that the pi initiated turned off valves for the day
         with open(filePath + '/bedValvesLog', 'a') as log_file:
             log_file.write('\n{}: The Pi is done for the day.\n\n'.format(currentTime()))
+        message = ('{} {}: The Pi is done for the day. Water Temperature: {} ºF.'.format(date(), currentTime(), '%.1f'%(checkTemp())))
+        tweet(message)
     else:
-        # logs that the pi restarted to the bed valves log
+        # logs that the pi restarted, recorded in the bed valves log
         with open(filePath + '/bedValvesLog', 'a') as log_file:
             log_file.write('\n{}: The Pi restarted.\n\n'.format(currentTime()))
         # waits for internet connection for 60 seconds
@@ -475,12 +615,15 @@ if __name__ == '__main__':
         print(sensorValues)
     elif len(sys.argv) == 2 and sys.argv[1] == 'init':
         # runs when the Raspberry Pi restarts
+        # run by console, type in 'python3 /home/pi/GardenPi/main.py init'
         init()
     elif len(sys.argv) == 2 and sys.argv[1] == 'startup':
         # runs at the beginning of each day
+        # run by console, type in 'python3 /home/pi/GardenPi/main.py startup'
         init(True, False)
     elif len(sys.argv) == 2 and sys.argv[1] == 'shutdown':
         # runs at the end of each day
+        # run by console, type in 'python3 /home/pi/GardenPi/main.py shutdown'
         init(False, True)
     else:
         print('Unknown inputs ', sys.argv)
